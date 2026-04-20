@@ -1,6 +1,7 @@
 import streamlit as st
 from groq import Groq
 import json
+import re
 import io
 from datetime import datetime
 import openpyxl
@@ -122,26 +123,31 @@ def analyze_chat(api_key: str, chat: str, _: str = "") -> dict:
   "title": "미팅 주제 또는 프로젝트명 (예: 2024 마케팅 전략)",
   "meeting_datetime": "미팅 날짜와 시간 (예: 2024-01-15 오전 10:00, 없으면 대화 날짜)",
   "participants": ["참여자1", "참여자2"],
-  "background": "미팅을 하게 된 배경이나 목적 (2-3문장)",
-  "content": "미팅의 핵심 결정사항·합의사항만 3~5개 이내로 추려서 번호 목록으로 작성. 단순 대화나 인사말은 제외. 각 항목은 한 문장으로 간결하게. (예: 1. xxx\\n2. xxx)"
+  "background": "미팅을 하게 된 배경 (1-2문장, 왜 이 미팅을 하게 됐는지)",
+  "purpose": "미팅의 목적 (1-2문장, 이 미팅에서 무엇을 달성하려 했는지)",
+  "content": "미팅에서 논의된 내용을 계층형 불릿으로 작성. 번호는 사용하지 말 것. 형식: 대분류 항목은 '• 항목명', 세부사항은 '  - 세부내용' 으로 들여쓰기. 예시:\n• 사업 인지하게 된 배경\n  - 국지호 차장의 사업 이관 건\n• 구매 예산\n  - 2,000만원 이내"
 }}
 
 팀즈 대화:
 {chat}"""
 
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=2000
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "You are a JSON-only assistant. Always respond with valid JSON and nothing else."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=2000,
+        response_format={"type": "json_object"}
     )
 
     raw = response.choices[0].message.content.strip()
 
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    return json.loads(raw.strip())
+    # JSON 블록만 추출 (코드펜스 등 섞여도 안전하게)
+    match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if match:
+        raw = match.group(0)
+    return json.loads(raw)
 
 
 # ── Excel 보고서 생성 함수 ────────────────────────────────────
@@ -174,18 +180,23 @@ def create_xlsx(data: dict) -> bytes:
     ws.row_dimensions[row].height = 34
     row += 2
 
-    def write_field(label: str, value: str, value_height: int = 18):
+    def calc_height(text: str) -> int:
+        if not text:
+            return 18
+        lines = text.split("\n")
+        total = sum(max(1, -(-len(line) // 55)) for line in lines)
+        return max(18, total * 15)
+
+    def write_field(label: str, value: str):
         nonlocal row
-        # 레이블 셀
         label_cell = ws[f"A{row}"]
         label_cell.value = f"* {label} :"
         label_cell.font = Font(name="맑은 고딕", size=10, bold=True, color=COLOR_DARK)
         label_cell.fill = PatternFill("solid", fgColor=COLOR_BG_ALT)
         label_cell.alignment = Alignment(horizontal="left", vertical="top", indent=1)
         label_cell.border = border
-        ws.row_dimensions[row].height = value_height
+        ws.row_dimensions[row].height = calc_height(value)
 
-        # 값 셀
         value_cell = ws[f"B{row}"]
         value_cell.value = value
         value_cell.font = Font(name="맑은 고딕", size=10, color=COLOR_DARK)
@@ -195,15 +206,12 @@ def create_xlsx(data: dict) -> bytes:
         row += 1
 
     participants = ", ".join(data.get("participants", []))
-    content = data.get("content", "")
-
-    content_lines = content.count("\n") + 1 if content else 1
-    content_height = max(18, content_lines * 16)
 
     write_field("미팅일시", data.get("meeting_datetime", datetime.now().strftime("%Y-%m-%d")))
     write_field("미팅인원", participants)
     write_field("미팅배경", data.get("background", ""))
-    write_field("미팅내용", content, value_height=content_height)
+    write_field("미팅목적", data.get("purpose", ""))
+    write_field("미팅내용", data.get("content", ""))
 
     row += 1
 
@@ -259,6 +267,7 @@ if "report_data" in st.session_state and "xlsx_bytes" in st.session_state:
         st.markdown(f"**\\* 미팅일시 :** {report_data.get('meeting_datetime', '')}")
         st.markdown(f"**\\* 미팅인원 :** {', '.join(report_data.get('participants', []))}")
         st.markdown(f"**\\* 미팅배경 :** {report_data.get('background', '')}")
+        st.markdown(f"**\\* 미팅목적 :** {report_data.get('purpose', '')}")
         st.markdown("**\\* 미팅내용 :**")
         st.write(report_data.get("content", ""))
 
